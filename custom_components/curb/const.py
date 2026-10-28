@@ -23,6 +23,18 @@ METERS_MIN_KEEP_RATIO = 0.5
 # Space_Stat values seen: Active, active, new, New, Activw, Remove.
 METER_SKIP_STATUS = ("remove",)
 
+# ── St. Paul (city ArcGIS org behind its "Parking in Downtown" map) ──────
+# Found 2026-10-28 via web app 95361716a5434600b04e07e301c2373e. Spaces are
+# points (1,882), named and grouped using the city's street centerlines.
+STP_ARCGIS = "https://services1.arcgis.com/9meaaHE3uiba0zr8/arcgis/rest/services"
+STP_SPACES_URL = f"{STP_ARCGIS}/Metered_Street_Parking_Spaces_(View)/FeatureServer/3/query"
+STP_CENTERLINES_URL = f"{STP_ARCGIS}/StreetCenterlines/FeatureServer/{{layer}}/query"
+# 53 ramps/lots with hourly/daily rates; the rates were last updated in 2020.
+STP_FACILITIES_URL = f"{STP_ARCGIS}/DowntownParkingv5_view/FeatureServer/0/query"
+
+CITIES = {"minneapolis": "Minneapolis", "stpaul": "St. Paul"}
+FACILITY_DEDUPE_M = 60   # an OSM lot this close to a city-listed one is the same lot
+
 # ── OpenStreetMap lots (Overpass) ────────────────────────────────────────
 # Lots and ramps exist in OSM but almost never have prices (146 features near
 # the North Loop, ~none with fee info), so they're listed, not priced.

@@ -6,12 +6,13 @@ Search a destination (or use your location or a map tap), set when you'll arrive
 
 ## What it knows
 
+- **St. Paul parking meters** from the city's downtown parking map: day and night rates, time limits, rush-hour and overnight restrictions, Sundays and city holidays, and event rates for Grand Casino Arena and CHS Field, plus the city's list of ramps and lots with (2020) rates.
 - **Minneapolis parking meters** from the city's public meter map: rate, enforcement hours and days, time limits, split rates, tow/no-stopping windows, and event rates for Target Field, Target Center, U.S. Bank Stadium, Huntington Bank Stadium and the Convention Center. Refreshed weekly.
 - **Your saved spots**, shared by everyone in the house.
 - **Lots and ramps** from OpenStreetMap: locations and names, but rarely prices.
 - **Walk times** from Google Routes (falls back to estimates).
 
-It doesn't know whether a space is open right now, unmetered street rules, or holidays. Posted signs win.
+It doesn't know whether a space is open right now, unmetered street rules, or Minneapolis holidays. Posted signs win.
 
 ## Install
 

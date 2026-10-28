@@ -172,10 +172,11 @@ const app = (() => {
     if (!status.configured) {
       out.push(`<div class="banner"><strong>No Google key yet.</strong> Add <code>google_api_key: !secret curb_google_api_key</code> under <code>curb:</code> in configuration.yaml for place search and real walk times. "Near me" and "Pick on map" work without it.</div>`);
     }
-    if (!status.meters.count) {
-      out.push(status.meters.error
-        ? `<div class="banner"><strong>Couldn't load the city's meter map.</strong> ${esc(status.meters.error)}</div>`
-        : `<div class="banner"><strong>Loading the city's meter map…</strong> First start takes about a minute.</div>`);
+    for (const c of status.meters.cities) {
+      if (c.count) continue;
+      out.push(c.error
+        ? `<div class="banner"><strong>Couldn't load ${esc(c.label)}'s meter map.</strong> ${esc(c.error)}</div>`
+        : `<div class="banner"><strong>Loading ${esc(c.label)}'s meter map…</strong> First start takes about a minute.</div>`);
     }
     document.getElementById('banners').innerHTML = out.join('');
   }
@@ -234,7 +235,7 @@ const app = (() => {
           <select onchange="app.setForm('venue', this.value)">
             <option value="">None</option>${venues}
           </select></div>
-        <div class="ctl ${form.venue ? '' : 'hidden'}"><label>Event starts</label>
+        <div class="ctl ${form.venue && !venueFixed(form.venue) ? '' : 'hidden'}"><label>Event starts</label>
           <input type="time" value="${form.eventStart}" onchange="app.setForm('eventStart', this.value)" /></div>
       </div>`;
   }
@@ -264,6 +265,28 @@ const app = (() => {
       </div>`;
   }
 
+  function lotRow(l) {
+    const pill = l.rate ? `<span class="pill orange">${esc(l.rate)}</span>`
+      : l.fee === 'free' ? '<span class="pill green">Free (per OSM)</span>'
+      : l.fee === 'paid' ? '<span class="pill grey">Paid</span>' : '';
+    const meta = [esc(l.kind), `~${Math.max(1, Math.round(l.walk_min))} min walk`];
+    if (l.operator) meta.push(esc(l.operator));
+    if (l.hours) meta.push(esc(l.hours));
+    if (l.height) meta.push(`max height ${esc(l.height)}`);
+    if (l.rate && l.rates_as_of) meta.push(`rate listed ${esc(l.rates_as_of.slice(0, 4))}`);
+    return `
+      <div class="small-row">
+        <div>
+          <div>${esc(l.name)} ${pill}</div>
+          <div class="meta">${meta.join(' · ')}</div>
+        </div>
+        <div class="row-actions" style="margin-top:0">
+          ${l.website ? `<a class="btn sm" href="${esc(l.website)}" target="_blank" rel="noopener">Rates</a>` : ''}
+          <a class="btn sm" href="${esc(l.nav_url)}" target="_blank" rel="noopener">Navigate</a>
+        </div>
+      </div>`;
+  }
+
   function renderPlanBody() {
     const el = document.getElementById('plan-body');
     if (!dest) { el.innerHTML = ''; return; }
@@ -276,12 +299,10 @@ const app = (() => {
         + (plan.counts.blocked ? `, ${plan.counts.blocked} with no parking during it` : ''),
     ];
     if (plan.event) {
-      const start = new Date(plan.event.start);
-      const from = new Date(start.getTime() - 180 * 60000);
-      const to = new Date(start.getTime() + 60 * 60000);
-      lines.push(plan.event.venue === 'convention'
-        ? `${esc(plan.event.label)} event rates apply all day on meters in its zone.`
-        : `${esc(plan.event.label)} event rates apply ${fmtClock(from)}–${fmtClock(to)} on meters in its zone.`);
+      const ev = plan.event;
+      lines.push(ev.rate_from
+        ? `${esc(ev.label)} event rates apply ${fmtClock(ev.rate_from)}–${fmtClock(ev.rate_to)} on meters in its zone.`
+        : `${esc(ev.label)} event rates apply all day on meters in its zone.`);
     }
     if (plan.walk_error) lines.push(`Walk times are estimates (~): ${esc(plan.walk_error)}`);
     if (planning) lines.push('Updating…');
@@ -295,15 +316,9 @@ const app = (() => {
     const lots = plan.lots.length ? `
       <details class="lots">
         <summary>Lots & ramps nearby (${plan.lots.length})</summary>
-        <div class="hint">From OpenStreetMap, which rarely lists prices. Check SpotHero or ParkWhiz for garage rates.</div>
-        ${plan.lots.map(l => `
-          <div class="small-row">
-            <div>
-              <div>${esc(l.name)} ${l.fee === 'free' ? '<span class="pill green">Free (per OSM)</span>' : l.fee === 'paid' ? '<span class="pill grey">Paid</span>' : ''}</div>
-              <div class="meta">${esc(l.kind)} · ~${Math.max(1, Math.round(l.walk_min))} min walk${l.operator ? ` · ${esc(l.operator)}` : ''}${l.hours ? ` · ${esc(l.hours)}` : ''}</div>
-            </div>
-            <a class="btn sm" href="${esc(l.nav_url)}" target="_blank" rel="noopener">Navigate</a>
-          </div>`).join('')}
+        <div class="hint">St. Paul's list includes rates last updated by the city in 2020, so check before you go. Elsewhere lots come from OpenStreetMap, which rarely lists prices; SpotHero or ParkWhiz have garage rates.</div>
+        ${plan.lots.map(lotRow).join('')}
+        ${plan.lots_pending ? '<div class="meta">Loading more from OpenStreetMap…</div>' : ''}
       </details>`
       : plan.lots_pending ? '<div class="status">Loading lots & ramps from OpenStreetMap…</div>'
       : plan.lots_error ? `<div class="status">Lots unavailable: ${esc(plan.lots_error)}</div>` : '';
@@ -338,13 +353,16 @@ const app = (() => {
   }
 
   function renderFooter() {
-    const m = status.meters;
-    const line = m.count
-      ? `City meter data: ${m.count.toLocaleString()} blocks · updated ${ago(m.updated)} · <a href="#" onclick="app.refreshMeters(event)">Refresh</a>`
-      : '';
+    const lines = status.meters.cities.filter(c => c.count).map(c =>
+      `${esc(c.label)}: ${c.count.toLocaleString()} meter blocks · updated ${ago(c.updated)}`
+      + (c.error ? `<div class="status err">${esc(c.error)}</div>` : ''));
     document.getElementById('footer').innerHTML = `
-      ${line}${m.error && m.count ? `<div class="status err">${esc(m.error)}</div>` : ''}
-      <div>Rules come from the city's meter map. Posted signs win; holidays aren't accounted for.</div>`;
+      ${lines.join('<br>')}${lines.length ? ` · <a href="#" onclick="app.refreshMeters(event)">Refresh</a>` : ''}
+      <div>Rules come from each city's meter map. Posted signs win. St. Paul holidays are counted; Minneapolis holidays aren't.</div>`;
+  }
+
+  function venueFixed(key) {
+    return !!status.venues.find(v => v.key === key)?.fixed;
   }
 
   // ── Map ────────────────────────────────────────────────────
@@ -397,8 +415,11 @@ const app = (() => {
 
     for (const m of plan.map.meters) {
       const color = costColor(m.cost, m.blocked);
-      L.polygon(m.ring, { color, weight: selected === m.key ? 4 : 2, fillOpacity: 0.3, dashArray: m.blocked ? '4 4' : null })
-        .on('click', e => { L.DomEvent.stopPropagation(e); if (!m.blocked) select(m.key); })
+      // Minneapolis faces are polygons; St. Paul's are lines through the spaces.
+      const shape = m.shape === 'line'
+        ? L.polyline(m.ring, { color, weight: selected === m.key ? 9 : 6, opacity: 0.8, dashArray: m.blocked ? '4 6' : null })
+        : L.polygon(m.ring, { color, weight: selected === m.key ? 4 : 2, fillOpacity: 0.3, dashArray: m.blocked ? '4 4' : null });
+      shape.on('click', e => { L.DomEvent.stopPropagation(e); if (!m.blocked) select(m.key); })
         .addTo(layers.meters);
     }
     for (const l of plan.lots) {
@@ -445,7 +466,7 @@ const app = (() => {
     if (!form.radius) form.radius = status.default_radius;
     render();
     clearTimeout(retryTimer);
-    if (!status.meters.count && !status.meters.error) retryTimer = setTimeout(load, 10000);
+    if (status.meters.cities.some(c => !c.count && !c.error)) retryTimer = setTimeout(load, 10000);
   }
 
   function show(v) {
@@ -587,7 +608,8 @@ const app = (() => {
     showFlash('Re-downloading the city\'s meter map…');
     try {
       status = await api('POST', '/meters/refresh');
-      showFlash(status.meters.error ? status.meters.error : `Loaded ${status.meters.count.toLocaleString()} meter blocks`, !!status.meters.error);
+      const errs = status.meters.cities.filter(c => c.error).map(c => `${c.label}: ${c.error}`);
+      showFlash(errs.length ? errs.join(' · ') : `Loaded ${status.meters.count.toLocaleString()} meter blocks`, errs.length > 0);
       render();
       if (dest) runPlan();
     } catch (err) {

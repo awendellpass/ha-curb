@@ -17,8 +17,9 @@ meter" flag instead of a wrong price.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 
 MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
@@ -50,11 +51,14 @@ class Window:
         return dow in self.days and self.start <= mod < self.end
 
 
+NO_LIMIT = 0  # a RateRule limit meaning "no time limit in this window"
+
+
 @dataclass(frozen=True)
 class RateRule:
     window: Window
     rate: float
-    limit: int | None  # minutes; None = keep the base limit
+    limit: int | None  # minutes; None = keep the base limit; NO_LIMIT = none
 
 
 # Keyed by _norm(Split_rate). First matching rule wins; outside all of them
@@ -117,14 +121,25 @@ NO_PARKING: dict[str, tuple[Window, ...]] = {
 }
 NO_RESTRICTION = "ALWAYS CHECK FOR POSTED RESTRICTIONS ON STREET"
 
-# Event venues: (label, minutes before start, minutes after start) the event
-# rate runs, per the city's event-zone layer. None = all day of the event.
-VENUES: dict[str, tuple[str, int | None, int | None]] = {
-    "target_field": ("Target Field", 180, 60),
-    "target_center": ("Target Center", 180, 60),
-    "us_bank": ("U.S. Bank Stadium", 180, 60),
-    "huntington": ("Huntington Bank Stadium", 180, 60),
-    "convention": ("Convention Center", None, None),
+@dataclass(frozen=True)
+class Venue:
+    label: str
+    before: int | None = None   # Minneapolis: event rate runs `before` min before
+    after: int | None = None    # the start to `after` min after; None = all day
+    fixed: tuple[int, int] | None = None  # St. Paul: set clock hours, start ignored
+
+
+# Minneapolis windows are from the city's event-zone layer. St. Paul's city
+# page lists event-rate hours per event, 6-10 PM for nearly all of them (one
+# CHS Field Saturday game was 4-8 PM).
+VENUES: dict[str, Venue] = {
+    "target_field": Venue("Target Field", 180, 60),
+    "target_center": Venue("Target Center", 180, 60),
+    "us_bank": Venue("U.S. Bank Stadium", 180, 60),
+    "huntington": Venue("Huntington Bank Stadium", 180, 60),
+    "convention": Venue("Convention Center"),
+    "grand_casino": Venue("Grand Casino Arena (St. Paul)", fixed=(18 * H, 22 * H)),
+    "chs_field": Venue("CHS Field (St. Paul)", fixed=(18 * H, 22 * H)),
 }
 _VENUE_TEXT = {
     "TARGET FIELD": "target_field",
@@ -237,10 +252,15 @@ class Rules:
     no_parking: tuple[Window, ...]
     event: EventRule | None
     flags: tuple[str, ...]     # things the stay result should warn about
+    holiday: Callable[[date], bool] | None = None  # meters free on these days
 
 
 def rules_for(m: dict) -> Rules:
-    """m = a meters row (raw city strings)."""
+    """m = a meters row. Minneapolis rows carry the city's raw strings;
+    St. Paul rows carry parsed fields in `extra` (see stpaul.py)."""
+    if m.get("city") == "stpaul":
+        from . import stpaul
+        return stpaul.rules(m)
     return _rules(m.get("rate") or "", m.get("hours") or "", m.get("days") or "",
                   m.get("hour_limit") or "", m.get("split") or "",
                   m.get("restriction") or "", m.get("event") or "")
@@ -278,13 +298,27 @@ def _rules(rate, hours, days, limit, split, restriction, event) -> Rules:
 class Event:
     venue: str        # VENUES key
     start: datetime
+    end: datetime | None = None  # explicit event-rate end (St. Paul); else from VENUES
+
+    @classmethod
+    def on(cls, venue: str, day: date, start_hm: tuple[int, int]) -> "Event":
+        """The event on `day`: fixed-window venues ignore the start time."""
+        v = VENUES[venue]
+        midnight = datetime(day.year, day.month, day.day)
+        if v.fixed:
+            return cls(venue, midnight + timedelta(minutes=v.fixed[0]),
+                       midnight + timedelta(minutes=v.fixed[1]))
+        return cls(venue, midnight + timedelta(hours=start_hm[0], minutes=start_hm[1]))
 
 
-def _event_rate_window(ev: Event) -> tuple[datetime, datetime] | None:
-    _label, before, after = VENUES[ev.venue]
-    if before is None:
-        return None  # all day
-    return ev.start - timedelta(minutes=before), ev.start + timedelta(minutes=after)
+def event_rate_window(ev: Event) -> tuple[datetime, datetime] | None:
+    """When the event rate runs; None = all day of the event."""
+    if ev.end:
+        return ev.start, ev.end
+    v = VENUES[ev.venue]
+    if v.before is None:
+        return None
+    return ev.start - timedelta(minutes=v.before), ev.start + timedelta(minutes=v.after)
 
 
 def fmt_time(t: datetime) -> str:
@@ -299,25 +333,28 @@ def fmt_money(x: float) -> str:
     return f"${x:,.2f}"
 
 
-def assess(m: dict, arrive: datetime, minutes: int, event: Event | None = None) -> dict:
+def assess(m: dict, arrive: datetime, minutes: int,
+           events: Event | list[Event] | None = None) -> dict:
     """Cost and rules for parking at meter block m from arrive for minutes.
 
     Walks the stay minute by minute (a stay is at most a few hundred minutes,
     so this is cheap and handles midnight, day changes and event windows
     without special cases)."""
     rules = rules_for(m)
-    ev_rule = rules.event if event and rules.event and event.venue in rules.event.venues else None
-    ev_window = _event_rate_window(event) if ev_rule else None
-    ev_day = event.start.date() if ev_rule else None
+    if isinstance(events, Event):
+        events = [events]
+    mine = [e for e in events or [] if rules.event and e.venue in rules.event.venues]
+    windows = [(e.start.date(), event_rate_window(e)) for e in mine]
 
     flags = list(rules.flags)
     cost = 0.0
     segs: list[list] = []          # [start, end, rate]; rate 0 = free
     blocked: list[datetime] = []
-    run = longest = 0              # consecutive paid minutes
-    limit_in_run: int | None = None
-    strictest: int | None = None   # strictest limit over the longest run
-    unknown_rate = False
+    # Time limits apply per rule: 2 hr under a daytime limit followed by an
+    # unlimited evening is fine, so the run resets when the limit changes.
+    run, run_limit = 0, None
+    over: int | None = None        # the limit that was exceeded
+    unknown_rate = holiday = event_hit = False
 
     for i in range(minutes):
         t = arrive + timedelta(minutes=i)
@@ -326,9 +363,12 @@ def assess(m: dict, arrive: datetime, minutes: int, event: Event | None = None) 
         if any(w.covers(dow, mod) for w in rules.no_parking):
             blocked.append(t)
 
-        on_event_day = ev_rule is not None and t.date() == ev_day
+        event_day = any(d == t.date() for d, _w in windows)
+        in_event = any(d == t.date() and (w is None or w[0] <= t < w[1]) for d, w in windows)
         enforced = bool(rules.base and rules.base.covers(dow, mod)) or (
-            on_event_day and ev_rule.event_day_hours and EVENT_DAY_HOURS.covers(dow, mod))
+            event_day and rules.event.event_day_hours and EVENT_DAY_HOURS.covers(dow, mod))
+        if enforced and rules.holiday and rules.holiday(t.date()):
+            enforced, holiday = False, True
 
         rate, limit = 0.0, None
         if enforced:
@@ -339,21 +379,22 @@ def assess(m: dict, arrive: datetime, minutes: int, event: Event | None = None) 
                     rate = rr.rate
                     limit = rr.limit if rr.limit is not None else rules.base_limit
                     break
-            if on_event_day and (ev_window is None or ev_window[0] <= t < ev_window[1]):
-                rate = ev_rule.rate
+            if in_event:
+                rate, event_hit = rules.event.rate, True
             if rate is None:
                 # "split" base with no matching split rule: use the highest
                 # rate this block charges so the estimate errs high.
                 unknown_rate = True
                 rate = max([rr.rate for rr in rules.split] or [0.0])
             cost += rate / 60
+        if limit:  # None or NO_LIMIT = nothing to count
+            if limit != run_limit:
+                run, run_limit = 0, limit
             run += 1
-            if limit is not None:
-                limit_in_run = limit if limit_in_run is None else min(limit_in_run, limit)
-            if run > longest:
-                longest, strictest = run, limit_in_run
+            if run > limit and over is None:
+                over = limit
         else:
-            run, limit_in_run = 0, None
+            run, run_limit = 0, None
 
         if segs and segs[-1][2] == rate:
             segs[-1][1] = t + timedelta(minutes=1)
@@ -362,18 +403,19 @@ def assess(m: dict, arrive: datetime, minutes: int, event: Event | None = None) 
 
     if unknown_rate:
         flags.append("Base rate not listed — estimated from the highest posted rate")
-    over_limit = strictest is not None and longest > strictest
-    out = {
+    note = _describe(segs)
+    if holiday:
+        note = f"{note} (city holiday: meters free)"
+    return {
         "cost": round(cost + 1e-9, 2),
         "paid_minutes": sum(int((s[1] - s[0]).total_seconds() // 60) for s in segs if s[2]),
-        "note": _describe(segs),
-        "over_limit": over_limit,
-        "limit_minutes": strictest if over_limit else None,
+        "note": note,
+        "over_limit": over is not None,
+        "limit_minutes": over,
         "blocked": _describe_blocked(blocked) if blocked else None,
-        "event_rate": ev_rule.rate if ev_rule else None,
+        "event_rate": rules.event.rate if event_hit else None,
         "flags": flags,
     }
-    return out
 
 
 def _describe(segs: list[list]) -> str:
@@ -404,6 +446,9 @@ def _describe_blocked(times: list[datetime]) -> str:
 
 def describe_rules(m: dict) -> str:
     """Short human summary of the posted rules, e.g. '$1.00/hr · 9 AM–6 PM Mon–Fri · 4 hr limit'."""
+    if m.get("city") == "stpaul":
+        from . import stpaul
+        return stpaul.describe(m)
     parts = []
     rate = (m.get("rate") or "").strip()
     if rate and rate.lower() != "split":
@@ -418,8 +463,14 @@ def describe_rules(m: dict) -> str:
         parts.append(f"{fmt_time(a)}–{fmt_time(b)} {days}".strip())
     lim = parse_limit(m.get("hour_limit") or "")
     if lim:
-        parts.append(f"{lim // H} hr limit" if lim % H == 0 else f"{lim} min limit")
+        parts.append(fmt_limit(lim))
     return " · ".join(parts)
+
+
+def fmt_limit(minutes: int) -> str:
+    if minutes % H == 0:
+        return f"{minutes // H} hr limit"
+    return f"{minutes / H:g} hr limit" if minutes > H else f"{minutes} min limit"
 
 
 _ORDINAL = re.compile(r"^(\d+)(ST|ND|RD|TH)$")

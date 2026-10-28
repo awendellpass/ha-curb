@@ -1,13 +1,16 @@
 """SQLite storage for Curb.
 
-meters     — the city's metered block faces, replaced wholesale on each
-             refresh. Rule fields are the city's raw strings; meters.py reads
-             them at plan time, so rule fixes never need a migration.
+meters     — metered block faces for every city, replaced per city on each
+             refresh. Minneapolis rule fields are the city's raw strings and
+             St. Paul's sit in `extra`; meters.py / stpaul.py read them at
+             plan time, so rule fixes never need a migration.
+facilities — city-listed ramps and lots with rates (St. Paul), replaced per
+             city on refresh.
 spots      — saved parking spots, shared by everyone in the household.
              User-owned: only the panel writes them.
 lots_cache — OpenStreetMap lots around a searched point, keyed by rounded
              lat/lon + radius.
-meta       — key/value: schema_version, meters_updated, meters_error
+meta       — key/value: schema_version, meters_updated:<city>, meters_error:<city>
 """
 from __future__ import annotations
 
@@ -20,10 +23,23 @@ from homeassistant.core import HomeAssistant
 
 from .const import DB_NAME
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-METER_FIELDS = ("id", "station", "address", "rate", "hours", "days", "hour_limit",
+METER_FIELDS = ("id", "city", "block", "block_name", "side", "shape", "extra",
+                "station", "address", "rate", "hours", "days", "hour_limit",
                 "split", "restriction", "event", "status", "lat", "lon", "ring")
+_JSON_FIELDS = ("ring", "extra")
+FACILITY_FIELDS = ("id", "city", "name", "kind", "operator", "address", "hourly", "daily",
+                   "hours", "website", "height", "rates_as_of", "lat", "lon")
+# Added in schema 2 (St. Paul): column -> definition
+_V2_METER_COLUMNS = {
+    "city": "TEXT NOT NULL DEFAULT 'minneapolis'",
+    "block": "TEXT NOT NULL DEFAULT ''",
+    "block_name": "TEXT NOT NULL DEFAULT ''",
+    "side": "TEXT NOT NULL DEFAULT ''",
+    "shape": "TEXT NOT NULL DEFAULT 'poly'",
+    "extra": "TEXT NOT NULL DEFAULT '{}'",
+}
 SPOT_FIELDS = ("name", "notes", "rate", "lat", "lon")
 
 
@@ -43,7 +59,13 @@ def init_db(hass: HomeAssistant) -> None:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS meters (
-                id           INTEGER PRIMARY KEY,   -- city OBJECTID_12 (Station_ID isn't unique)
+                id           INTEGER PRIMARY KEY,   -- Mpls OBJECTID_12; St. Paul 1,000,000+
+                city         TEXT NOT NULL DEFAULT 'minneapolis',
+                block        TEXT NOT NULL DEFAULT '',  -- faces sharing it may merge
+                block_name   TEXT NOT NULL DEFAULT '',  -- '2nd St N, 400 block'
+                side         TEXT NOT NULL DEFAULT '',  -- odd/even, or north/south/...
+                shape        TEXT NOT NULL DEFAULT 'poly',  -- poly (Mpls) | line (St. Paul)
+                extra        TEXT NOT NULL DEFAULT '{}',    -- city-specific parsed rules
                 station      TEXT NOT NULL DEFAULT '',
                 address      TEXT NOT NULL DEFAULT '',
                 rate         TEXT NOT NULL DEFAULT '',
@@ -68,6 +90,22 @@ def init_db(hass: HomeAssistant) -> None:
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS facilities (
+                id           TEXT PRIMARY KEY,
+                city         TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                kind         TEXT NOT NULL DEFAULT '',
+                operator     TEXT NOT NULL DEFAULT '',
+                address      TEXT NOT NULL DEFAULT '',
+                hourly       TEXT NOT NULL DEFAULT '',
+                daily        TEXT NOT NULL DEFAULT '',
+                hours        TEXT NOT NULL DEFAULT '',
+                website      TEXT NOT NULL DEFAULT '',
+                height       TEXT NOT NULL DEFAULT '',
+                rates_as_of  TEXT NOT NULL DEFAULT '',
+                lat          REAL NOT NULL,
+                lon          REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS lots_cache (
                 key         TEXT PRIMARY KEY,
                 fetched_at  TEXT NOT NULL,
@@ -83,6 +121,20 @@ def init_db(hass: HomeAssistant) -> None:
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    version = int(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0])
+    if version < 2:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(meters)")}
+        for col, definition in _V2_METER_COLUMNS.items():
+            if col not in have:
+                conn.execute(f"ALTER TABLE meters ADD COLUMN {col} {definition}")
+        # Old rows lack block info: drop them so the next refresh reloads both cities.
+        conn.execute("DELETE FROM meters")
+        conn.execute("DELETE FROM meta WHERE key IN ('meters_updated', 'meters_error')")
+        conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
 
 
 # ── meta ─────────────────────────────────────────────────────────────────
@@ -100,21 +152,32 @@ def set_meta(hass: HomeAssistant, key: str, value: str | None) -> None:
 
 # ── meters ───────────────────────────────────────────────────────────────
 
-def meter_count(hass: HomeAssistant) -> int:
+def meter_count(hass: HomeAssistant, city: str | None = None) -> int:
     with _connect(hass) as conn:
+        if city:
+            return conn.execute("SELECT COUNT(*) FROM meters WHERE city = ?", (city,)).fetchone()[0]
         return conn.execute("SELECT COUNT(*) FROM meters").fetchone()[0]
 
 
-def replace_meters(hass: HomeAssistant, rows: list[dict]) -> None:
+def replace_meters(hass: HomeAssistant, city: str, rows: list[dict],
+                   facilities: list[dict] | None = None) -> None:
+    """Swap in one city's meters (and its listed ramps/lots, when given)."""
     with _connect(hass) as conn:
-        conn.execute("DELETE FROM meters")
+        conn.execute("DELETE FROM meters WHERE city = ?", (city,))
         conn.executemany(
             f"INSERT INTO meters ({', '.join(METER_FIELDS)}) "
             f"VALUES ({', '.join('?' for _ in METER_FIELDS)})",
-            [tuple(json.dumps(r[f]) if f == "ring" else r[f] for f in METER_FIELDS) for r in rows],
+            [tuple(json.dumps(r[f]) if f in _JSON_FIELDS else r[f] for f in METER_FIELDS) for r in rows],
         )
+        if facilities is not None:
+            conn.execute("DELETE FROM facilities WHERE city = ?", (city,))
+            conn.executemany(
+                f"INSERT OR REPLACE INTO facilities ({', '.join(FACILITY_FIELDS)}) "
+                f"VALUES ({', '.join('?' for _ in FACILITY_FIELDS)})",
+                [tuple(f[k] for k in FACILITY_FIELDS) for f in facilities],
+            )
         conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('meters_updated', ?)", (_now(),)
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (f"meters_updated:{city}", _now())
         )
 
 
@@ -127,9 +190,18 @@ def meters_in_box(hass: HomeAssistant, s: float, w: float, n: float, e: float) -
     out = []
     for r in rows:
         d = dict(r)
-        d["ring"] = json.loads(d["ring"])
+        for f in _JSON_FIELDS:
+            d[f] = json.loads(d[f] or "null")
         out.append(d)
     return out
+
+
+def facilities_in_box(hass: HomeAssistant, s: float, w: float, n: float, e: float) -> list[dict]:
+    with _connect(hass) as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM facilities WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
+            (s, n, w, e),
+        )]
 
 
 # ── spots ────────────────────────────────────────────────────────────────

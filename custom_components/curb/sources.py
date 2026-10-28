@@ -11,6 +11,7 @@ import re
 
 import aiohttp
 
+from . import meters, stpaul
 from .const import (
     FETCH_TIMEOUT_SECONDS,
     LOTS_SKIP_ACCESS,
@@ -23,6 +24,9 @@ from .const import (
     PLACES_SEARCH_URL,
     ROUTES_FIELDS,
     ROUTES_MATRIX_URL,
+    STP_CENTERLINES_URL,
+    STP_FACILITIES_URL,
+    STP_SPACES_URL,
 )
 
 _TIMEOUT = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SECONDS)
@@ -57,29 +61,72 @@ def distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 # ── City meters ──────────────────────────────────────────────────────────
 
-async def fetch_meters(session: aiohttp.ClientSession) -> list[dict]:
+async def _arcgis(session: aiohttp.ClientSession, url: str, params: dict, who: str,
+                  order_by: str = "OBJECTID") -> list[dict]:
+    """Every feature an ArcGIS query returns, following its paging."""
     feats, offset = [], 0
     while True:
-        params = {
+        page_params = {
             "where": "1=1", "outFields": "*", "outSR": "4326", "f": "json",
-            "orderByFields": "OBJECTID_12", "resultOffset": str(offset),
-            "resultRecordCount": str(METERS_PAGE), "geometryPrecision": "6",
+            "orderByFields": order_by, "resultOffset": str(offset),
+            "resultRecordCount": str(METERS_PAGE), "geometryPrecision": "6", **params,
         }
         try:
-            async with session.get(METERS_URL, params=params, headers=_UA, timeout=_TIMEOUT) as resp:
+            async with session.get(url, params=page_params, headers=_UA, timeout=_TIMEOUT) as resp:
                 data = await _json(resp)
                 status = resp.status
         except (asyncio.TimeoutError, aiohttp.ClientError) as err:
-            raise _net(err, "the city meter map") from err
+            raise _net(err, who) from err
         if status != 200 or not isinstance(data, dict) or "features" not in data:
             msg = (data or {}).get("error", {}).get("message") if isinstance(data, dict) else None
-            raise SourceError(f"City meter map error {status}: {msg or 'unexpected reply'}")
+            raise SourceError(f"{who} error {status}: {msg or 'unexpected reply'}")
         page = data["features"]
         feats.extend(page)
         offset += len(page)
         if not data.get("exceededTransferLimit") or not page:
-            break
-    return parse_meters(feats)
+            return feats
+
+
+async def fetch_meters(session: aiohttp.ClientSession) -> list[dict]:
+    return parse_meters(await _arcgis(session, METERS_URL, {}, "the Minneapolis meter map", "OBJECTID_12"))
+
+
+async def fetch_stpaul(session: aiohttp.ClientSession) -> tuple[list[dict], list[dict], list[dict]]:
+    """(spaces, street segments around them, ramps/lots) as raw features;
+    stpaul.group_spaces / parse_facilities turn them into rows."""
+    who = "the St. Paul meter map"
+    spaces = await _arcgis(session, STP_SPACES_URL, {}, who)
+    pts = [f["geometry"] for f in spaces if "x" in (f.get("geometry") or {})]
+    if not pts:
+        raise SourceError(f"{who} returned no meter spaces")
+    pad = 0.003  # ~250 m around the outermost meters
+    envelope = (f"{min(p['x'] for p in pts) - pad},{min(p['y'] for p in pts) - pad},"
+                f"{max(p['x'] for p in pts) + pad},{max(p['y'] for p in pts) + pad}")
+    segments = []
+    for layer in stpaul.CENTERLINE_LAYERS:
+        segments += await _arcgis(session, STP_CENTERLINES_URL.format(layer=layer), {
+            "geometry": envelope, "geometryType": "esriGeometryEnvelope", "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "OBJECTID,ST_CONCAT,ST_NAME,F_XSTREET,T_XSTREET,ASSET_ID",
+        }, "St. Paul street map")
+    facilities = await _arcgis(session, STP_FACILITIES_URL, {}, "St. Paul ramp list")
+    return spaces, segments, facilities
+
+
+_MPLS_ADDRESS = re.compile(r"^(\d+)\s+(.+)$")
+
+
+def _mpls_block(address: str) -> tuple[str, str, str]:
+    """'401 2ND ST N' -> ('mpls:400:2ND ST N', '2nd St N, 400 block', 'odd')."""
+    m = _MPLS_ADDRESS.match(address)
+    if not m:
+        return f"mpls:{address.upper()}", meters.pretty_address(address), ""
+    number = int(m.group(1))
+    hundred = number // 100 * 100
+    street = re.sub(r"\s+", " ", m.group(2).strip().upper())
+    name = meters.pretty_address(f"{hundred} {street}").split(" ", 1)[1]
+    return (f"mpls:{hundred}:{street}", f"{name}, {'1–99' if hundred == 0 else hundred} block",
+            "odd" if number % 2 else "even")
 
 
 def parse_meters(feats: list[dict]) -> list[dict]:
@@ -92,10 +139,15 @@ def parse_meters(feats: list[dict]) -> list[dict]:
             continue
         ring = [[round(y, 6), round(x, 6)] for x, y in rings[0]]  # ArcGIS is [lon, lat]
         pts = ring[:-1] if len(ring) > 1 and ring[0] == ring[-1] else ring
+        address = (a.get("Street_Add") or "").strip()
+        block, block_name, side = _mpls_block(address)
         rows.append({
             "id": a.get("OBJECTID_12") or a.get("OBJECTID"),
+            "city": "minneapolis",
+            "block": block, "block_name": block_name, "side": side,
+            "shape": "poly", "extra": {},
             "station": str(a.get("Station_ID") or "").strip(),
-            "address": (a.get("Street_Add") or "").strip(),
+            "address": address,
             "rate": (a.get("Hourly_rat") or "").strip(),
             "hours": (a.get("Hours_of_E") or "").strip(),
             "days": (a.get("Days_of_en") or "").strip(),
