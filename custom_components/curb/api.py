@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -164,7 +165,7 @@ def _meter_option(m: dict, plan: dict, dist: float) -> dict:
         warnings.insert(0, f"{lim // 60} hr limit — you'd have to move" if lim % 60 == 0
                         else f"{lim} min limit — you'd have to move")
     return {
-        "key": f"m{m['id']}", "kind": "meter", "meter_id": m["id"],
+        "key": f"m{m['id']}", "kind": "meter", "meter_id": m["id"], "address": m["address"],
         "name": meters.pretty_address(m["address"]) or "Meter",
         "lat": m["lat"], "lon": m["lon"],
         "cost": a["cost"], "note": a["note"], "rules": meters.describe_rules(m),
@@ -185,6 +186,43 @@ def _spot_option(s: dict, plan: dict, dist: float) -> dict:
         "warnings": [], "dist_m": int(dist), "walk_m": walk_m, "walk_min": walk_min,
         "walk_source": "estimate", "nav_url": _nav_url(s["lat"], s["lon"]),
     }
+
+
+_ADDRESS = re.compile(r"^(\d+)\s+(.+)$")
+
+
+def _merge_sides(opts: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """Fold block faces of the same hundred-block that would cost and read
+    exactly the same for this stay (usually the two sides of one street)
+    into one option, kept at the closer face. Faces that differ in any way,
+    e.g. one side has a tow window, stay separate.
+    Returns (options, {merged-away key: kept key})."""
+    groups: dict[tuple, list[dict]] = {}
+    out: list[dict] = []
+    for o in opts:
+        m = _ADDRESS.match(o.get("address") or "") if o["kind"] == "meter" else None
+        if not m:
+            out.append(o)
+            continue
+        hundred = int(m.group(1)) // 100 * 100
+        street = re.sub(r"\s+", " ", m.group(2).strip().upper())
+        sig = (hundred, street, o["cost"], o["note"], o["rules"], tuple(o["warnings"]), o["over_limit"])
+        groups.setdefault(sig, []).append(o)
+
+    key_map: dict[str, str] = {}
+    for (hundred, street, *_), faces in groups.items():
+        keep = min(faces, key=lambda f: f["dist_m"])
+        if len(faces) > 1:
+            numbers = {int(_ADDRESS.match(f["address"]).group(1)) for f in faces}
+            both = len({n % 2 for n in numbers}) > 1
+            pretty = meters.pretty_address(f"{hundred} {street}").split(" ", 1)[1]
+            block = "1–99" if hundred == 0 else str(hundred)
+            keep = {**keep, "name": f"{pretty} ({block} block{', both sides' if both else ''})",
+                    "faces": len(faces)}
+            for f in faces:
+                key_map[f["key"]] = keep["key"]
+        out.append(keep)
+    return out, key_map
 
 
 async def _apply_walks(hass: HomeAssistant, dest: tuple[float, float], opts: list[dict]) -> str | None:
@@ -276,7 +314,8 @@ async def async_plan(hass: HomeAssistant, body: dict) -> dict:
         if d <= radius:
             opts.append(_spot_option(s, plan, d))
 
-    usable = sorted((o for o in opts if not o["blocked"]), key=_score)
+    usable, key_map = _merge_sides([o for o in opts if not o["blocked"]])
+    usable.sort(key=_score)
     walk_error = None
     if usable and _conf(hass).get("google_api_key"):
         walk_error = await _apply_walks(hass, (lat, lon), usable[:WALKS_PER_PLAN])
@@ -286,7 +325,7 @@ async def async_plan(hass: HomeAssistant, body: dict) -> dict:
     lots = await _cached_lots(hass, lat, lon, radius)
 
     meter_map = [
-        {"key": o["key"], "ring": m["ring"], "cost": o["cost"], "blocked": bool(o["blocked"]),
+        {"key": key_map.get(o["key"], o["key"]), "ring": m["ring"], "cost": o["cost"], "blocked": bool(o["blocked"]),
          "over_limit": o["over_limit"]}
         for (m, _d), o in zip(near, opts)
     ]

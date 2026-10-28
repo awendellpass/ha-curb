@@ -40,28 +40,13 @@ const app = (() => {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
 
-  // Day + time as two selects rather than a datetime-local picker: Firefox
-  // fires change on every field of that picker, which made it hard to set.
+  // Arrival is a date picker + a 15-minute time select. A single
+  // datetime-local picker fired change on every field in Firefox, and the
+  // time half was fiddly to set.
   function defaultArrive() {
     const d = new Date(Date.now() + 15 * 60000);
     d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
     return { day: ymd(d), time: `${pad(d.getHours())}:${pad(d.getMinutes())}` };
-  }
-
-  function dayOptions() {
-    const out = [];
-    for (let i = 0; i < 7; i++) {
-      const d = new Date();
-      d.setDate(d.getDate() + i);
-      const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow'
-        : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-      out.push([ymd(d), label]);
-    }
-    // Keep a day that's rolled into the past selectable (panel left open overnight).
-    if (!out.some(([v]) => v === form.day)) {
-      out.unshift([form.day, new Date(`${form.day}T12:00`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })]);
-    }
-    return out;
   }
 
   function timeOptions() {
@@ -230,9 +215,7 @@ const app = (() => {
       <div class="controls">
         <div class="ctl arrive"><label>Arrive</label>
           <div class="pair">
-            <select onchange="app.setForm('day', this.value)">
-              ${dayOptions().map(([v, l]) => `<option value="${v}" ${form.day === v ? 'selected' : ''}>${l}</option>`).join('')}
-            </select>
+            <input type="date" value="${form.day}" onchange="if (this.value) app.setForm('day', this.value)" />
             <select onchange="app.setForm('time', this.value)">
               ${timeOptions().map(([v, l]) => `<option value="${v}" ${form.time === v ? 'selected' : ''}>${l}</option>`).join('')}
             </select>
@@ -536,9 +519,9 @@ const app = (() => {
   function setForm(k, v) {
     form[k] = v;
     if (k === 'venue') renderPlanHead();  // shows/hides the event start time
-    // The event time input can fire on each digit; wait for typing to settle.
+    // Date and event-time inputs can fire on each typed part; let it settle.
     clearTimeout(planTimer);
-    planTimer = setTimeout(runPlan, k === 'eventStart' ? 600 : 0);
+    planTimer = setTimeout(runPlan, k === 'eventStart' || k === 'day' ? 600 : 0);
   }
 
   function setSort(k) {

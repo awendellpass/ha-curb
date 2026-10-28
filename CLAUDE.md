@@ -54,6 +54,8 @@ custom_components/curb/
 
 ## Ranking
 
+**Sides merge:** before walk times are fetched, block faces in the same hundred-block of the same street whose result is identical for this stay (cost, note, rules, warnings, over-limit) fold into one option at the closer face: "2nd St N (400 block, both sides)". Faces that differ in anything stay separate. The map keeps every polygon but gives merged faces the kept option's key, so selecting highlights both. Addresses under 100 read "1–99 block".
+
 Score = cost + $0.20 per walking minute + $25 if the stay runs past the time limit. Blocks with no parking during the stay are left out of the list (grey on the map). Default radius 1,200 m (~15 min walk); the Twins/Harmon spot is ~850 m from Target Field. The panel re-sorts client-side (Best / Closest / Cheapest) with the same weights.
 
 ## API Endpoints
