@@ -331,8 +331,11 @@ const app = (() => {
     document.getElementById('legend').classList.toggle('hidden', !plan);
     if (!map) {
       map = L.map('map').setView([status.home.lat, status.home.lon], 14);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; OpenStreetMap contributors &copy; CARTO', subdomains: 'abcd', maxZoom: 20,
+      // OSM's own tiles need no key (CARTO's started requiring one); the
+      // CSS filter on .leaflet-tile-pane darkens them to match the panel.
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
+        maxZoom: 19,
       }).addTo(map);
       layers.meters = L.layerGroup().addTo(map);
       layers.lots = L.layerGroup().addTo(map);
