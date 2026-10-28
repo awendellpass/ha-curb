@@ -7,7 +7,7 @@ v1 scope (2026-10-27): Minneapolis meters, OpenStreetMap lots, saved spots (shar
 ## Stack
 
 - **Backend:** Python, SQLite (`database.py`), HA's shared aiohttp session
-- **Frontend:** Vanilla JS + Leaflet 1.9.4 from unpkg, OpenStreetMap tiles darkened with a CSS filter on `.leaflet-tile-pane`. **CARTO basemaps now require an API key** (tiles came back watermarked "API KEY REQUIRED", 2026-10-27); don't switch back. Two-file iframe auth pattern: `curb-panel.js` passes `hass.auth.data.access_token` to `curb-app.js` via `postMessage`; every fetch sends `Authorization: Bearer`. Panel host uses `height: 100vh`. The iframe has `allow="geolocation"` for "Near me".
+- **Frontend:** Vanilla JS + Leaflet 1.9.4 from unpkg, Esri Dark Gray Canvas tiles (base + reference/labels layers, native zoom 16). Tile providers that failed (2026-10-27), don't switch to them: **CARTO** now requires an API key (watermarked tiles); **tile.openstreetmap.org** returns 403 "Access blocked" because HA serves panel files with `Referrer-Policy: no-referrer` and OSM requires a Referer. Two-file iframe auth pattern: `curb-panel.js` passes `hass.auth.data.access_token` to `curb-app.js` via `postMessage`; every fetch sends `Authorization: Bearer`. Panel host uses `height: 100vh`. The iframe has `allow="geolocation"` for "Near me".
 - **Deploy:** GitHub `awendellpass/ha-curb` → HACS custom repository → restart HA. Ask before pushing.
 
 ## Configuration

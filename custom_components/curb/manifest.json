@@ -1,7 +1,7 @@
 {
   "domain": "curb",
   "name": "Curb",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "documentation": "https://github.com/awendellpass/ha-curb",
   "issue_tracker": "https://github.com/awendellpass/ha-curb/issues",
   "requirements": [],

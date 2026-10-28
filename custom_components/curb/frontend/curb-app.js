@@ -331,12 +331,15 @@ const app = (() => {
     document.getElementById('legend').classList.toggle('hidden', !plan);
     if (!map) {
       map = L.map('map').setView([status.home.lat, status.home.lon], 14);
-      // OSM's own tiles need no key (CARTO's started requiring one); the
-      // CSS filter on .leaflet-tile-pane darkens them to match the panel.
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
-        maxZoom: 19,
+      // Esri Dark Gray Canvas: no key, no Referer check. CARTO now needs a
+      // key, and OSM's tile servers block requests without a Referer, which
+      // HA strips (Referrer-Policy: no-referrer). Labels are a separate layer.
+      const esri = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas';
+      const opts = { maxNativeZoom: 16, maxZoom: 19 };
+      L.tileLayer(`${esri}/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}`, {
+        ...opts, attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors',
       }).addTo(map);
+      L.tileLayer(`${esri}/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}`, opts).addTo(map);
       layers.meters = L.layerGroup().addTo(map);
       layers.lots = L.layerGroup().addTo(map);
       layers.spots = L.layerGroup().addTo(map);
