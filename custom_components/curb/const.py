@@ -1,0 +1,62 @@
+"""Constants for the Curb integration."""
+
+DOMAIN = "curb"
+DB_NAME = "curb.db"
+FRONTEND_PATH = "/curb_frontend"
+API_BASE = "/api/curb"
+
+# configuration.yaml key read by CONFIG_SCHEMA in __init__.py.
+CONF_GOOGLE_API_KEY = "google_api_key"
+
+# ── Minneapolis meters (ArcGIS layer behind the city's meter map) ────────
+# Found 2026-10-27 via the meter map web app (item f8005414ee1a48338aba6bce7fee4280).
+# 1,046 block faces citywide; maxRecordCount 1000, so it's paged.
+METERS_URL = (
+    "https://services.arcgis.com/afSMGVsC7QlRK1kZ/arcgis/rest/services/"
+    "msvcPW_ParkingMeters2/FeatureServer/0/query"
+)
+METERS_PAGE = 1000
+METERS_REFRESH_DAYS = 7
+# A refresh that returns far fewer meters than we hold is treated as a bad
+# response, not a citywide meter removal.
+METERS_MIN_KEEP_RATIO = 0.5
+# Space_Stat values seen: Active, active, new, New, Activw, Remove.
+METER_SKIP_STATUS = ("remove",)
+
+# ── OpenStreetMap lots (Overpass) ────────────────────────────────────────
+# Lots and ramps exist in OSM but almost never have prices (146 features near
+# the North Loop, ~none with fee info), so they're listed, not priced.
+# Public Overpass servers are often busy (timeouts/502s in testing), so each
+# is tried in turn.
+OVERPASS_URLS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+)
+# The main server took ~26 s for a lots query in testing (2026-10-27), so lots
+# load separately from the plan (GET /lots) and never hold it up.
+OVERPASS_TIMEOUT_SECONDS = 40
+LOTS_CACHE_DAYS = 7
+LOTS_SKIP_ACCESS = ("private", "customers", "permit", "no", "delivery", "residents", "employees")
+MAX_LOTS = 12
+
+# ── Google (key restricted to Places API (New) + Routes API) ────────────
+PLACES_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+PLACES_FIELDS = "places.id,places.displayName,places.formattedAddress,places.location"
+ROUTES_MATRIX_URL = "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
+ROUTES_FIELDS = "originIndex,destinationIndex,duration,distanceMeters,condition"
+WALK_CACHE_HOURS = 24
+FETCH_TIMEOUT_SECONDS = 30
+
+# ── Ranking ──────────────────────────────────────────────────────────────
+DEFAULT_RADIUS_M = 1200      # ~15 min walk; the Twins/Harmon spot is ~850 m out
+MAX_RADIUS_M = 2000
+WALK_M_PER_MIN = 80          # ~3 mph, for straight-line estimates
+WALK_DETOUR = 1.3            # streets vs straight line, for estimates
+WALK_VALUE_PER_MIN = 0.20    # $ a minute of walking is worth when ranking
+OVER_LIMIT_PENALTY = 25.0    # $ added when the stay runs past the time limit
+WALKS_PER_PLAN = 25          # candidates sent to Google for real walk times
+MAX_OPTIONS = 15
+MAX_STAY_MINUTES = 12 * 60
+
+STARTUP_DELAY_SECONDS = 30

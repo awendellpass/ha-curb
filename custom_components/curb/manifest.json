@@ -1,0 +1,11 @@
+{
+  "domain": "curb",
+  "name": "Curb",
+  "version": "0.1.0",
+  "documentation": "https://github.com/awendellpass/ha-curb",
+  "issue_tracker": "https://github.com/awendellpass/ha-curb/issues",
+  "requirements": [],
+  "dependencies": ["http", "frontend"],
+  "codeowners": ["@awendellpass"],
+  "iot_class": "cloud_polling"
+}

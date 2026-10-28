@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Curb</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #111113;
+      --card: #1c1c1e;
+      --card2: #2c2c2e;
+      --border: #3a3a3c;
+      --text: #ffffff;
+      --muted: #8e8e93;
+      --accent: #2f7cf6;
+      --green: #30d158;
+      --yellow: #ffd60a;
+      --orange: #ff9f0a;
+      --red: #ff453a;
+      --purple: #bf5af2;
+    }
+
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; min-height: 100vh; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    #main { max-width: 820px; margin: 0 auto; padding: 16px 16px 40px; }
+
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    header h1 { font-size: 22px; font-weight: 700; }
+    header .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+
+    .btn { background: var(--card2); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 8px 14px; font-size: 13px; cursor: pointer; white-space: nowrap; font-family: inherit; display: inline-block; }
+    .btn:hover { border-color: var(--accent); text-decoration: none; }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.danger:hover { border-color: var(--red); color: var(--red); }
+    .btn.sm { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+    .btn.on { border-color: var(--accent); color: var(--accent); }
+
+    .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+    .tab { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 999px; padding: 6px 14px; font-size: 13px; cursor: pointer; font-family: inherit; }
+    .tab.on { background: var(--card2); color: var(--text); border-color: var(--accent); }
+    .tab .n { color: var(--muted); margin-left: 4px; }
+
+    .flash { background: rgba(48, 209, 88, 0.12); color: var(--green); border-radius: 10px; padding: 8px 14px; font-size: 13px; margin-bottom: 12px; }
+    .flash.err { background: rgba(255, 69, 58, 0.12); color: var(--red); }
+    .banner { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--orange); border-radius: 10px; padding: 10px 14px; font-size: 13px; line-height: 1.5; margin-bottom: 12px; color: var(--muted); }
+    .banner strong { color: var(--text); }
+    .banner.pick { border-left-color: var(--accent); display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+
+    /* Search */
+    .search { display: flex; gap: 8px; margin-bottom: 8px; }
+    .search input { flex: 1; }
+    .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .results { background: var(--card); border-radius: 12px; margin-bottom: 12px; overflow: hidden; }
+    .result { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+    .result:last-child { border-bottom: none; }
+    .result:hover { background: var(--card2); }
+    .result .name { font-size: 14px; font-weight: 500; }
+    .result .addr { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* Plan controls */
+    .dest { font-size: 16px; font-weight: 600; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+    .dest .clear { font-size: 12px; font-weight: 400; }
+    .controls { display: grid; grid-template-columns: 1.6fr 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+    .controls.event { grid-template-columns: 1.6fr 1fr; }
+    .ctl label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+
+    input, select, textarea { width: 100%; background: var(--card2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font-size: 14px; font-family: inherit; color-scheme: dark; }
+    textarea { min-height: 70px; resize: vertical; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+
+    /* Map */
+    #map { height: 42vh; min-height: 260px; border-radius: 14px; margin: 10px 0 12px; background: #1a1a1a; }
+    #map.hidden { display: none; }
+    .leaflet-container { font-family: inherit; }
+    .pin { background: var(--accent); color: #fff; border: 2px solid #fff; border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; box-shadow: 0 1px 4px rgba(0,0,0,.6); }
+    .pin.free { background: #1f9e45; }
+    .pin.sel { transform: scale(1.25); border-color: var(--yellow); }
+    .pin.dest { background: var(--red); width: 18px; height: 18px; }
+    .pin.spot { background: var(--purple); }
+    .pin.lot { background: #555; font-size: 11px; width: 20px; height: 20px; }
+    .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin: -4px 4px 10px; }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+    /* Options */
+    .summary { font-size: 13px; color: var(--muted); margin: 4px 4px 10px; line-height: 1.5; }
+    .sorts { display: flex; gap: 6px; margin-bottom: 10px; align-items: center; font-size: 12px; color: var(--muted); }
+    .card { background: var(--card); border-radius: 14px; margin-bottom: 10px; padding: 12px 14px; border: 1px solid transparent; }
+    .card.sel { border-color: var(--accent); }
+    .row-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+    .row-title { font-size: 15px; font-weight: 600; line-height: 1.35; }
+    .row-title .rank { color: var(--muted); font-weight: 500; margin-right: 6px; }
+    .walk { font-size: 13px; margin-top: 4px; }
+    .row-meta { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.45; }
+    .row-text { font-size: 13px; margin-top: 4px; line-height: 1.45; }
+    .warn { font-size: 12px; color: var(--orange); margin-top: 4px; line-height: 1.4; }
+    .row-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+    .cost { font-size: 16px; font-weight: 700; white-space: nowrap; }
+    .cost.free { color: var(--green); }
+
+    .pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+    .pill.green { background: rgba(48, 209, 88, 0.15); color: var(--green); }
+    .pill.orange { background: rgba(255, 159, 10, 0.15); color: var(--orange); }
+    .pill.purple { background: rgba(191, 90, 242, 0.15); color: var(--purple); }
+    .pill.grey { background: var(--card2); color: var(--muted); }
+
+    details.lots { background: var(--card); border-radius: 14px; padding: 12px 14px; margin-top: 14px; }
+    details.lots summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+    details.lots .hint { font-size: 12px; color: var(--muted); margin: 6px 0 4px; }
+    .small-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .small-row:last-child { border-bottom: none; }
+    .small-row .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* Modal */
+    .modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; z-index: 2000; }
+    .modal { background: var(--card); border-radius: 14px; padding: 18px; width: 100%; max-width: 480px; }
+    .modal h2 { font-size: 17px; margin-bottom: 14px; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .field .hint { font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.4; }
+    .modal-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: 16px; }
+    .modal-actions .right { display: flex; gap: 8px; margin-left: auto; }
+    .form-err { color: var(--red); font-size: 13px; margin-top: 8px; }
+
+    .status { text-align: center; color: var(--muted); font-size: 12px; margin-top: 20px; line-height: 1.6; }
+    .status.err { color: var(--red); }
+    .empty { text-align: center; color: var(--muted); padding: 30px 20px; font-size: 14px; line-height: 1.5; }
+    .hidden { display: none !important; }
+
+    @media (max-width: 560px) {
+      .controls { grid-template-columns: 1fr 1fr; }
+      .controls .ctl.arrive { grid-column: 1 / -1; }
+      .controls.event { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="main">
+    <header>
+      <div>
+        <h1>Curb</h1>
+        <div class="sub">Free and cheap parking near where you're going</div>
+      </div>
+    </header>
+    <div id="tabs" class="tabs"></div>
+    <div id="flash"></div>
+
+    <section id="find">
+      <div id="banners"></div>
+      <div id="search-area"></div>
+      <div id="plan-head"></div>
+      <div id="map" class="hidden"></div>
+      <div id="legend" class="legend hidden">
+        <span><i style="background:#30d158"></i>Free</span>
+        <span><i style="background:#ffd60a"></i>Under $5</span>
+        <span><i style="background:#ff453a"></i>$5+</span>
+        <span><i style="background:#666"></i>No parking during stay</span>
+        <span><i style="background:#bf5af2"></i>Saved spot</span>
+      </div>
+      <div id="plan-body"></div>
+    </section>
+
+    <section id="spots" class="hidden"></section>
+
+    <div id="footer" class="status"></div>
+  </div>
+  <div id="modal"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="curb-app.js"></script>
+</body>
+</html>
