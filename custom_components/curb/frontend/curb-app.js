@@ -19,7 +19,9 @@ const app = (() => {
   let map = null;
   let layers = {};
   let fittedFor = null;     // plan the map was last zoomed to
-  const form = { arrive: defaultArrive(), hours: 2, radius: null, venue: '', eventStart: '19:00' };
+  let headFor;              // dest the controls were last drawn for
+  let planTimer = null;
+  const form = { ...defaultArrive(), hours: 2, radius: null, venue: '', eventStart: '19:00' };
 
   const WALK_VALUE_PER_MIN = 0.20;   // matches the backend's ranking
   const OVER_LIMIT_PENALTY = 25;
@@ -34,14 +36,42 @@ const app = (() => {
 
   function pad(n) { return String(n).padStart(2, '0'); }
 
-  function localInput(d) {
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  function ymd(d) {
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
 
+  // Day + time as two selects rather than a datetime-local picker: Firefox
+  // fires change on every field of that picker, which made it hard to set.
   function defaultArrive() {
     const d = new Date(Date.now() + 15 * 60000);
     d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
-    return localInput(d);
+    return { day: ymd(d), time: `${pad(d.getHours())}:${pad(d.getMinutes())}` };
+  }
+
+  function dayOptions() {
+    const out = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() + i);
+      const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow'
+        : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+      out.push([ymd(d), label]);
+    }
+    // Keep a day that's rolled into the past selectable (panel left open overnight).
+    if (!out.some(([v]) => v === form.day)) {
+      out.unshift([form.day, new Date(`${form.day}T12:00`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })]);
+    }
+    return out;
+  }
+
+  function timeOptions() {
+    const out = [];
+    for (let m = 0; m < 24 * 60; m += 15) {
+      const d = new Date(2000, 0, 1, 0, m);
+      out.push([`${pad(d.getHours())}:${pad(d.getMinutes())}`,
+        d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })]);
+    }
+    return out;
   }
 
   function fmtMoney(x) { return `$${Number(x).toFixed(2)}`; }
@@ -123,7 +153,12 @@ const app = (() => {
     if (view === 'find') {
       renderBanners();
       renderSearch();
-      renderPlanHead();
+      // Controls are redrawn only when the destination changes, so a plan
+      // coming back never wipes a control mid-edit.
+      if (headFor !== dest) {
+        headFor = dest;
+        renderPlanHead();
+      }
       renderPlanBody();
       updateMap();
     } else {
@@ -194,7 +229,14 @@ const app = (() => {
       </div>
       <div class="controls">
         <div class="ctl arrive"><label>Arrive</label>
-          <input type="datetime-local" value="${form.arrive}" onchange="app.setForm('arrive', this.value)" /></div>
+          <div class="pair">
+            <select onchange="app.setForm('day', this.value)">
+              ${dayOptions().map(([v, l]) => `<option value="${v}" ${form.day === v ? 'selected' : ''}>${l}</option>`).join('')}
+            </select>
+            <select onchange="app.setForm('time', this.value)">
+              ${timeOptions().map(([v, l]) => `<option value="${v}" ${form.time === v ? 'selected' : ''}>${l}</option>`).join('')}
+            </select>
+          </div></div>
         <div class="ctl"><label>Stay</label>
           <select onchange="app.setForm('hours', +this.value)">
             ${STAYS.map(h => `<option value="${h}" ${form.hours === h ? 'selected' : ''}>${fmtHours(h)}</option>`).join('')}
@@ -493,7 +535,10 @@ const app = (() => {
 
   function setForm(k, v) {
     form[k] = v;
-    runPlan();
+    if (k === 'venue') renderPlanHead();  // shows/hides the event start time
+    // The event time input can fire on each digit; wait for typing to settle.
+    clearTimeout(planTimer);
+    planTimer = setTimeout(runPlan, k === 'eventStart' ? 600 : 0);
   }
 
   function setSort(k) {
@@ -509,7 +554,7 @@ const app = (() => {
     planErr = null;
     render();
     const body = {
-      lat: dest.lat, lon: dest.lon, name: dest.name, arrive: form.arrive,
+      lat: dest.lat, lon: dest.lon, name: dest.name, arrive: `${form.day}T${form.time}`,
       hours: form.hours, radius: form.radius,
       event: form.venue ? { venue: form.venue, start: form.eventStart } : null,
     };
