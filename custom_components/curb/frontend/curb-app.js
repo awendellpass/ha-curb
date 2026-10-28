@@ -90,8 +90,9 @@ const app = (() => {
     return hrs < 24 ? `${hrs} hr ago` : `${Math.round(hrs / 24)} days ago`;
   }
 
+  // penalty: the backend's extra weight for unmetered curbs (unverified).
   function score(o) {
-    return o.cost + o.walk_min * WALK_VALUE_PER_MIN + (o.over_limit ? OVER_LIMIT_PENALTY : 0);
+    return o.cost + o.walk_min * WALK_VALUE_PER_MIN + (o.penalty || 0) + (o.over_limit ? OVER_LIMIT_PENALTY : 0);
   }
 
   function sorted(opts) {
@@ -242,9 +243,10 @@ const app = (() => {
 
   function optionCard(o, i) {
     const free = o.cost === 0;
-    const badge = o.kind === 'spot' ? ' <span class="pill purple">Saved</span>' : '';
+    const badge = o.kind === 'spot' ? ' <span class="pill purple">Saved</span>'
+      : o.kind === 'curb' ? ' <span class="pill green">No meter</span>' : '';
     const warns = (o.warnings || []).map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join('');
-    const save = o.kind === 'meter'
+    const save = o.kind !== 'spot'
       ? `<button class="btn sm" onclick="event.stopPropagation(); app.saveFromOption('${o.key}')">Save as spot</button>` : '';
     return `
       <div class="card ${selected === o.key ? 'sel' : ''}" id="opt-${o.key}" onclick="app.select('${o.key}')">
@@ -298,6 +300,10 @@ const app = (() => {
       `Arriving ${esc(fmtWhen(plan.arrive))} for ${fmtHours(plan.minutes / 60)} · ${plan.counts.meters} metered blocks within ${radiusLabel}, ${plan.counts.free} free for your stay`
         + (plan.counts.blocked ? `, ${plan.counts.blocked} with no parking during it` : ''),
     ];
+    if (plan.counts.unmetered) {
+      lines.push(`${plan.counts.unmetered} unmetered street sides (dashed) look open for your stay — free, but check the posted signs.`);
+    }
+    if (plan.curbs_error) lines.push(`Unmetered streets unavailable: ${esc(plan.curbs_error)}`);
     if (plan.event) {
       const ev = plan.event;
       lines.push(ev.rate_from
@@ -311,7 +317,7 @@ const app = (() => {
     const sortBtn = (k, label) => `<button class="btn sm ${sort === k ? 'on' : ''}" onclick="app.setSort('${k}')">${label}</button>`;
     const list = opts.length
       ? opts.map(optionCard).join('')
-      : `<div class="empty">No metered blocks or saved spots in range. Try a wider radius, or check the lots below.</div>`;
+      : `<div class="empty">No street parking or saved spots in range. Try a wider radius, or check the lots below.</div>`;
 
     const lots = plan.lots.length ? `
       <details class="lots">
@@ -358,7 +364,8 @@ const app = (() => {
       + (c.error ? `<div class="status err">${esc(c.error)}</div>` : ''));
     document.getElementById('footer').innerHTML = `
       ${lines.join('<br>')}${lines.length ? ` · <a href="#" onclick="app.refreshMeters(event)">Refresh</a>` : ''}
-      <div>Rules come from each city's meter map. Posted signs win. St. Paul holidays are counted; Minneapolis holidays aren't.</div>`;
+      <div>Rules come from each city's meter map. Posted signs win. St. Paul holidays are counted; Minneapolis holidays aren't.</div>
+      <div>Unmetered streets: St. Paul's sign inventory and 2025 tickets; Minneapolis permit areas only (it doesn't publish its signs).</div>`;
   }
 
   function venueFixed(key) {
@@ -373,7 +380,8 @@ const app = (() => {
     el.classList.remove('hidden');
     document.getElementById('legend').classList.toggle('hidden', !plan);
     if (!map) {
-      map = L.map('map').setView([status.home.lat, status.home.lon], 14);
+      // Canvas: a plan can draw ~1,000 street sides.
+      map = L.map('map', { preferCanvas: true }).setView([status.home.lat, status.home.lon], 14);
       // Esri Dark Gray Canvas: no key, no Referer check. CARTO now needs a
       // key, and OSM's tile servers block requests without a Referer, which
       // HA strips (Referrer-Policy: no-referrer). Labels are a separate layer.
@@ -413,6 +421,15 @@ const app = (() => {
     }
     if (!plan) return;
 
+    // Unmetered sides: thin dashes under the meters, faded where only part is open.
+    for (const c of plan.map.curbs || []) {
+      const sel = selected === c.key;
+      L.polyline(c.ring, {
+        color: c.blocked ? '#666' : '#30d158', weight: sel ? 6 : 3, dashArray: '2 6',
+        opacity: c.blocked ? 0.5 : c.partial || c.over_limit ? 0.5 : 0.9,
+      }).on('click', e => { L.DomEvent.stopPropagation(e); if (!c.blocked) select(c.key); })
+        .addTo(layers.meters);
+    }
     for (const m of plan.map.meters) {
       const color = costColor(m.cost, m.blocked);
       // Minneapolis faces are polygons; St. Paul's are lines through the spaces.

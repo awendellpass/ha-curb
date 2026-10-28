@@ -6,6 +6,8 @@ v1 scope (2026-10-27): Minneapolis meters, OpenStreetMap lots, saved spots (shar
 
 v0.2 (2026-10-28): **St. Paul** added (see below). Expansion to other cities is on hold while Andy tries SpotAngels for travel.
 
+v0.3 (2026-10-28): **unmetered streets** (see below). Free parking is the point, and neither meter map covers unmetered curb; Andy's usual Wild-game spot (Spring St by the Upper Landing apartments) was invisible.
+
 ## Stack
 
 - **Backend:** Python, SQLite (`database.py`), HA's shared aiohttp session
@@ -30,6 +32,7 @@ custom_components/curb/
   const.py      — source URLs, ranking weights, limits
   meters.py     — Minneapolis meter rules + the shared cost walk (`assess`), venues (no HA imports)
   stpaul.py     — St. Paul spaces -> block faces, rules, holidays, listed ramps (no HA imports)
+  curbs.py      — unmetered block sides: streets minus meters, sign text -> rules (no HA imports)
   sources.py    — city meters, Overpass lots, Google Places + Routes (fetch + parse)
   database.py   — SQLite: meters (both cities, `city` column), facilities, spots, lots_cache, meta; schema 2
   api.py        — meter refresh, search, plan ranking, lots, spot validation
@@ -68,6 +71,20 @@ custom_components/curb/
   - Arena zone on a Wild Sat 6–10 = $15.00 (vs $5.00 with no event).
   - Rush 4–6 restriction is flagged.
 
+## Unmetered streets (curbs.py, checked 2026-10-28)
+
+- **Streets:** St. Paul `StreetCenterlines/{1,2,3,4,6}`; Minneapolis `MPLS_Centerline/0` with `F_CLASS` A30 (arterials) and A40 (local). Skipped: 40+ mph (Shepard Rd), blocks ending at a freeway ramp ("Nb I35e To …"), pieces under 30 m.
+- **Each segment becomes two sides**, drawn 5 m off the centerline. A side is dropped when a meter sits within 25 m of it (not within 8 m of a block end), or when the same street's other centerline runs alongside it (the median of a divided road: Kellogg, 7th St W).
+- **St. Paul signs:** `Traffic_Signs/FeatureServer/4`, 72k signs, edited 2026-08; codes R7*/R8*, active only. Each sign goes to the nearest side within 20 m (median 7 m). `parse_sign` reads the free text (all 1,791 distinct messages checked):
+  - limits ("2 HOUR PARKING 8AM-6PM MON-FRI EXCEPT BY PERMIT AREA 30"), timed no-parking (rush hour, Tuesdays 2-7 AM sanitation, school days = Mon–Fri), permit-only, seasonal date ranges, overnight spans split at midnight.
+  - ignored: corner/drive/hydrant/crosswalk clearances (every block has them), handicap, State Fair, EV charging, snow.
+  - bus/loading/taxi/valet zones = "partial" (a warning). A bare "NO PARKING" is partial alone; **2+ on one side = the whole side**, unless the side also posts a parking limit (then they mark stretches).
+- **St. Paul tickets:** `ParkingCitationsSPPD_2025_public_view/0`, NO PARKING ZONE only, counted per location by the server (`groupByFieldsForStatistics`; ~7,500 downtown tickets → ~300 rows). 15+ within 25 m of a block → a warning.
+- **Minneapolis:** its `Signs` layer uses numeric codes with no published legend, so only Critical Parking Areas (`CPA_Update/0`, 330 block faces, "2 HR Except By Permit" + "8am-6pm Mon-Fri") are read, through the same sign parser.
+- **Cost:** always $0. Rules feed `meters.assess` (via `curbs.rules(m, day)`): limits as $0 split rules, no-parking as windows, so over-limit and blocked work like meters. Assessments are memoized per rule set per plan (most sides share empty rules).
+- **Ranking penalty** (sent as `penalty`, mirrored in the panel's score): $1 unverified, $0.25 where a parking limit is posted (proof parking is allowed), +$1 partial zone, +$2 heavily ticketed, +$2 unsigned major street. Arena, Sat 6 PM: the Spring St blocks rank 4–6.
+- **Cache:** per city and searched area in `lots_cache` (`curbs:<city>:<lat>,<lon>,<radius>`), 7 days, fetched with 150 m padding. First fetch ~1–3 s; build ~0.1 s on the PC.
+
 ## Meter rules (meters.py)
 
 - Base rule: `Hourly_rat` / `Hours_of_E` / `Days_of_en` / `Hour_Limit`. All 9 hour formats and 3 day formats in the city data parse.
@@ -81,7 +98,7 @@ custom_components/curb/
 
 **Sides merge:** before walk times are fetched, block faces in the same hundred-block of the same street whose result is identical for this stay (cost, note, rules, warnings, over-limit) fold into one option at the closer face: "2nd St N (400 block, both sides)". Faces that differ in anything stay separate. The map keeps every polygon but gives merged faces the kept option's key, so selecting highlights both. Addresses under 100 read "1–99 block".
 
-Score = cost + $0.20 per walking minute + $25 if the stay runs past the time limit. Blocks with no parking during the stay are left out of the list (grey on the map). Default radius 1,200 m (~15 min walk); the Twins/Harmon spot is ~850 m from Target Field. The panel re-sorts client-side (Best / Closest / Cheapest) with the same weights.
+Score = cost + $0.20 per walking minute + $25 if the stay runs past the time limit + the unmetered `penalty`. Blocks with no parking during the stay are left out of the list (grey on the map). Default radius 1,200 m (~15 min walk); the Twins/Harmon spot is ~850 m from Target Field. The panel re-sorts client-side (Best / Closest / Cheapest) with the same weights.
 
 ## API Endpoints
 

@@ -11,13 +11,16 @@ import re
 
 import aiohttp
 
-from . import meters, stpaul
+from . import curbs, meters, stpaul
 from .const import (
     FETCH_TIMEOUT_SECONDS,
     LOTS_SKIP_ACCESS,
     METER_SKIP_STATUS,
     METERS_PAGE,
     METERS_URL,
+    MPLS_CENTERLINE_URL,
+    MPLS_PERMIT_URL,
+    MPLS_STREET_CLASSES,
     OVERPASS_TIMEOUT_SECONDS,
     OVERPASS_URLS,
     PLACES_FIELDS,
@@ -26,7 +29,9 @@ from .const import (
     ROUTES_MATRIX_URL,
     STP_CENTERLINES_URL,
     STP_FACILITIES_URL,
+    STP_SIGNS_URL,
     STP_SPACES_URL,
+    STP_TICKETS_URL,
 )
 
 _TIMEOUT = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SECONDS)
@@ -111,6 +116,52 @@ async def fetch_stpaul(session: aiohttp.ClientSession) -> tuple[list[dict], list
         }, "St. Paul street map")
     facilities = await _arcgis(session, STP_FACILITIES_URL, {}, "St. Paul ramp list")
     return spaces, segments, facilities
+
+
+async def fetch_curbs(session: aiohttp.ClientSession, city: str,
+                      box: tuple[float, float, float, float]) -> dict:
+    """Streets and what's posted on them inside box (s, w, n, e), in the
+    compact form curbs.build reads (and the cache stores)."""
+    s, w, n, e = box
+    area = {"geometry": f"{w},{s},{e},{n}", "geometryType": "esriGeometryEnvelope", "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects"}
+    if city == "stpaul":
+        who = "St. Paul street map"
+        layers, signs, tickets = await asyncio.gather(
+            asyncio.gather(*(_arcgis(session, STP_CENTERLINES_URL.format(layer=layer), {
+                **area, "outFields": "OBJECTID,ASSET_ID,ST_CONCAT,ST_NAME,F_XSTREET,T_XSTREET,"
+                                     "ROUTESPEED,CTU_NAME_L,CTU_NAME_R"}, who)
+                for layer in stpaul.CENTERLINE_LAYERS)),
+            _arcgis(session, STP_SIGNS_URL, {
+                **area, "where": "STATUS = 'ACTIVE' AND (CODE LIKE 'R7%' OR CODE LIKE 'R8%')",
+                "outFields": "OBJECTID,CODE,MESSAGE"}, "St. Paul sign inventory"),
+            # Counted per location by the server: ~7,500 downtown tickets -> ~300 rows.
+            _arcgis(session, STP_TICKETS_URL, {
+                **area, "where": "DESCRIPTION LIKE '%NO PARKING%'", "returnGeometry": "false",
+                "outStatistics": '[{"statisticType":"count","onStatisticField":"OBJECTID","outStatisticFieldName":"n"}]',
+                "groupByFieldsForStatistics": "LATITUDE,LONGITUDE"}, "St. Paul ticket data", "LATITUDE"),
+        )
+        return {
+            "segments": curbs.stpaul_segments(dict(zip(stpaul.CENTERLINE_LAYERS, layers))),
+            "signs": curbs.stpaul_signs(signs),
+            "tickets": curbs.stpaul_tickets(tickets),
+            "has_signs": True,
+        }
+    classes = ",".join(f"'{c}'" for c in MPLS_STREET_CLASSES)
+    streets, permits = await asyncio.gather(
+        _arcgis(session, MPLS_CENTERLINE_URL, {
+            **area, "where": f"F_CLASS IN ({classes})",
+            "outFields": "OBJECTID,STREETALL,F_CLASS,F_XSTREET_1,T_XSTREET_1,SPEED_LIM,CITYLEFT,CITYRIGT"},
+            "Minneapolis street map"),
+        _arcgis(session, MPLS_PERMIT_URL, {
+            **area, "outFields": "OBJECTID_1,Enforcement,HourLimit,Alt_Enforcement"},
+            "Minneapolis permit parking map", "OBJECTID_1"),
+    )
+    return {
+        "segments": curbs.mpls_segments(streets),
+        "permit_areas": curbs.mpls_permit_areas(permits),
+        "has_signs": False,
+    }
 
 
 _MPLS_ADDRESS = re.compile(r"^(\d+)\s+(.+)$")

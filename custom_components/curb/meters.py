@@ -339,8 +339,14 @@ def assess(m: dict, arrive: datetime, minutes: int,
 
     Walks the stay minute by minute (a stay is at most a few hundred minutes,
     so this is cheap and handles midnight, day changes and event windows
-    without special cases)."""
-    rules = rules_for(m)
+    without special cases). Unmetered curbs (curbs.py) come through here
+    too, with rules for the arrival day: free, but limits and no-parking
+    windows count the same way."""
+    if m.get("kind") == "curb":
+        from . import curbs
+        rules = curbs.rules(m, arrive.date())
+    else:
+        rules = rules_for(m)
     if isinstance(events, Event):
         events = [events]
     mine = [e for e in events or [] if rules.event and e.venue in rules.event.venues]
@@ -446,6 +452,9 @@ def _describe_blocked(times: list[datetime]) -> str:
 
 def describe_rules(m: dict) -> str:
     """Short human summary of the posted rules, e.g. '$1.00/hr · 9 AM–6 PM Mon–Fri · 4 hr limit'."""
+    if m.get("kind") == "curb":
+        from . import curbs
+        return curbs.describe(m)
     if m.get("city") == "stpaul":
         from . import stpaul
         return stpaul.describe(m)

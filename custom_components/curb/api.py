@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
@@ -10,9 +11,12 @@ from datetime import datetime, timedelta
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from . import database, meters, sources, stpaul
+from . import curbs, database, meters, sources, stpaul
 from .const import (
     CITIES,
+    CITY_BOUNDS,
+    CURBS_CACHE_DAYS,
+    CURBS_PAD_M,
     DEFAULT_RADIUS_M,
     DOMAIN,
     FACILITY_DEDUPE_M,
@@ -20,10 +24,16 @@ from .const import (
     MAX_LOTS,
     MAX_OPTIONS,
     MAX_RADIUS_M,
+    MAJOR_STREET_PENALTY,
     MAX_STAY_MINUTES,
     METERS_MIN_KEEP_RATIO,
     METERS_REFRESH_DAYS,
     OVER_LIMIT_PENALTY,
+    PARTIAL_SIGNS_PENALTY,
+    POSTED_PARKING_PENALTY,
+    TICKETS_PENALTY,
+    TICKETS_WARN,
+    UNMETERED_PENALTY,
     WALK_CACHE_HOURS,
     WALK_DETOUR,
     WALK_M_PER_MIN,
@@ -175,7 +185,8 @@ def _estimate_walk(dist: float) -> tuple[int, float]:
 
 
 def _score(o: dict) -> float:
-    return o["cost"] + o["walk_min"] * WALK_VALUE_PER_MIN + (OVER_LIMIT_PENALTY if o["over_limit"] else 0)
+    return (o["cost"] + o["walk_min"] * WALK_VALUE_PER_MIN + o.get("penalty", 0)
+            + (OVER_LIMIT_PENALTY if o["over_limit"] else 0))
 
 
 def _meter_option(m: dict, plan: dict, dist: float) -> dict:
@@ -194,6 +205,43 @@ def _meter_option(m: dict, plan: dict, dist: float) -> dict:
         "event_rate": a["event_rate"], "over_limit": a["over_limit"], "blocked": a["blocked"],
         "warnings": warnings, "dist_m": int(dist), "walk_m": walk_m, "walk_min": walk_min,
         "walk_source": "estimate", "nav_url": _nav_url(m["lat"], m["lon"]),
+    }
+
+
+def _curb_option(c: dict, plan: dict, dist: float, memo: dict) -> dict:
+    """An unmetered block side. Most share the same (usually empty) rules,
+    so assessments are memoized per rule set for the plan."""
+    x = c["extra"]
+    sig = json.dumps(x["rules"], sort_keys=True)
+    if sig not in memo:
+        memo[sig] = meters.assess(c, plan["arrive"], plan["minutes"])
+    a = memo[sig]
+    walk_m, walk_min = _estimate_walk(dist)
+    warnings = []
+    if a["over_limit"]:
+        warnings.append(f"{meters.fmt_limit(a['limit_minutes'])} — you'd have to move")
+    warnings += [f"Posted on part of this side: {p}" for p in x["partial"][:2]]
+    if x["tickets"] >= TICKETS_WARN:
+        warnings.append(f"{x['tickets']} no-parking tickets on or near this block in 2025")
+    # A busy street with nothing posted is more likely missing data than open curb.
+    unsigned_major = x.get("major") and not x["rules"]
+    if unsigned_major:
+        warnings.append("Busy street with no parking signs on record — often restricted")
+    # A posted "2 HR PARKING" is proof parking is allowed; no record is a guess.
+    posted = any(r["kind"] == "limit" for r in x["rules"])
+    penalty = ((POSTED_PARKING_PENALTY if posted else UNMETERED_PENALTY)
+               + (PARTIAL_SIGNS_PENALTY if x["partial"] else 0)
+               + (TICKETS_PENALTY if x["tickets"] >= TICKETS_WARN else 0)
+               + (MAJOR_STREET_PENALTY if unsigned_major else 0))
+    return {
+        "key": f"c{c['id']}", "kind": "curb", "city": c["city"],
+        "block": c["block"], "block_name": c["block_name"], "side": c["side"],
+        "name": c["address"], "lat": c["lat"], "lon": c["lon"],
+        "cost": 0.0, "note": a["note"], "rules": meters.describe_rules(c),
+        "event_rate": None, "over_limit": a["over_limit"], "blocked": a["blocked"],
+        "warnings": warnings, "penalty": penalty, "partial": bool(x["partial"]),
+        "dist_m": int(dist), "walk_m": walk_m, "walk_min": walk_min,
+        "walk_source": "estimate", "nav_url": _nav_url(c["lat"], c["lon"]),
     }
 
 
@@ -219,7 +267,7 @@ def _merge_sides(opts: list[dict]) -> tuple[list[dict], dict[str, str]]:
     groups: dict[tuple, list[dict]] = {}
     out: list[dict] = []
     for o in opts:
-        if o["kind"] != "meter" or not o.get("block"):
+        if o["kind"] == "spot" or not o.get("block"):
             out.append(o)
             continue
         sig = (o["block"], o["cost"], o["note"], o["rules"], tuple(o["warnings"]), o["over_limit"])
@@ -334,10 +382,47 @@ async def async_lots(hass: HomeAssistant, query: dict) -> dict:
     return {"lots": await _lots_near(hass, lat, lon, radius, osm), "error": error}
 
 
+def _overlaps(box: tuple, bounds: tuple) -> bool:
+    return box[0] < bounds[2] and bounds[0] < box[2] and box[1] < bounds[3] and bounds[1] < box[3]
+
+
+async def _curbs_near(hass: HomeAssistant, lat: float, lon: float, radius: int,
+                      meter_rows: list[dict]) -> tuple[list[dict], str | None]:
+    """Unmetered block sides around a point, for each city the area touches.
+    City data is cached a week per area; meters are matched fresh each plan."""
+    box = _box(lat, lon, radius + CURBS_PAD_M)
+    rows, errors = [], []
+    for city, bounds in CITY_BOUNDS.items():
+        if not _overlaps(box, bounds):
+            continue
+        key = f"curbs:{city}:{_lots_key(lat, lon, radius)}"
+        cached = await _run(hass, database.get_lots_cache, key)
+        if cached and datetime.now() - datetime.fromisoformat(cached[0]) < timedelta(days=CURBS_CACHE_DAYS):
+            data = cached[1]
+        else:
+            try:
+                data = await sources.fetch_curbs(async_get_clientsession(hass), city, box)
+                await _run(hass, database.set_lots_cache, key, data)
+            except sources.SourceError as err:
+                _LOGGER.warning("Curb: %s unmetered streets unavailable: %s", CITIES[city], err)
+                errors.append(f"{CITIES[city]}: {err}")
+                if not cached:
+                    continue
+                data = cached[1]
+        points = []
+        for m in meter_rows:
+            if m.get("city") != city:
+                continue
+            # St. Paul faces are the spaces themselves; Minneapolis faces are curbside polygons.
+            points += [tuple(p) for p in m["ring"]] if m.get("shape") == "line" else [(m["lat"], m["lon"])]
+        rows += await hass.async_add_executor_job(curbs.build, city, data, points)
+    return rows, " · ".join(errors) or None
+
+
 async def async_plan(hass: HomeAssistant, body: dict) -> dict:
     plan = clean_plan(body)
     lat, lon, radius = plan["lat"], plan["lon"], plan["radius"]
-    rows = await _run(hass, database.meters_in_box, *_box(lat, lon, radius))
+    rows = await _run(hass, database.meters_in_box, *_box(lat, lon, radius + CURBS_PAD_M))
     near = []
     for m in rows:
         d = sources.distance_m(lat, lon, m["lat"], m["lon"])
@@ -345,6 +430,13 @@ async def async_plan(hass: HomeAssistant, body: dict) -> dict:
             near.append((m, d))
 
     opts = [_meter_option(m, plan, d) for m, d in near]
+    curb_rows, curbs_error = await _curbs_near(hass, lat, lon, radius, rows)
+    curb_near, memo = [], {}
+    for c in curb_rows:
+        d = sources.distance_m(lat, lon, c["lat"], c["lon"])
+        if d <= radius:
+            curb_near.append((c, _curb_option(c, plan, d, memo)))
+    opts += [o for _c, o in curb_near]
     for s in await _run(hass, database.get_spots):
         d = sources.distance_m(lat, lon, s["lat"], s["lon"])
         if d <= radius:
@@ -366,6 +458,11 @@ async def async_plan(hass: HomeAssistant, body: dict) -> dict:
          "cost": o["cost"], "blocked": bool(o["blocked"]), "over_limit": o["over_limit"]}
         for (m, _d), o in zip(near, opts)
     ]
+    curb_map = [
+        {"key": key_map.get(o["key"], o["key"]), "ring": c["ring"], "blocked": bool(o["blocked"]),
+         "over_limit": o["over_limit"], "partial": o["partial"]}
+        for c, o in curb_near
+    ]
     ev = plan["event"]
     ev_window = meters.event_rate_window(ev) if ev else None
     return {
@@ -385,12 +482,14 @@ async def async_plan(hass: HomeAssistant, body: dict) -> dict:
         "counts": {
             "meters": len(near),
             "free": sum(1 for o in opts if o["kind"] == "meter" and not o["blocked"] and o["cost"] == 0),
-            "blocked": sum(1 for o in opts if o["blocked"]),
+            "blocked": sum(1 for o in opts if o["kind"] == "meter" and o["blocked"]),
+            "unmetered": sum(1 for _c, o in curb_near if not o["blocked"]),
         },
         "lots": lots,
         "lots_pending": osm is None,
         "walk_error": walk_error,
-        "map": {"meters": meter_map},
+        "curbs_error": curbs_error,
+        "map": {"meters": meter_map, "curbs": curb_map},
         "cities": sorted({m.get("city") for m, _d in near if m.get("city")}),
     }
 

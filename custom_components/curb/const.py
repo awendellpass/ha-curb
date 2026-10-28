@@ -35,6 +35,29 @@ STP_FACILITIES_URL = f"{STP_ARCGIS}/DowntownParkingv5_view/FeatureServer/0/query
 CITIES = {"minneapolis": "Minneapolis", "stpaul": "St. Paul"}
 FACILITY_DEDUPE_M = 60   # an OSM lot this close to a city-listed one is the same lot
 
+# ── Unmetered curbs (curbs.py) ───────────────────────────────────────────
+# Rough city extents (s, w, n, e): a plan only asks a city for streets when
+# its search area overlaps the city.
+CITY_BOUNDS = {
+    "minneapolis": (44.889, -93.330, 45.052, -93.193),
+    "stpaul": (44.886, -93.208, 44.992, -93.004),
+}
+# St. Paul sign inventory: 72k signs with their text, edited 2026-08.
+STP_SIGNS_URL = f"{STP_ARCGIS}/Traffic_Signs/FeatureServer/4/query"
+# St. Paul 2025 parking tickets (57k, with lat/lon and violation).
+STP_TICKETS_URL = f"{STP_ARCGIS}/ParkingCitationsSPPD_2025_public_view/FeatureServer/0/query"
+MPLS_ARCGIS = "https://services.arcgis.com/afSMGVsC7QlRK1kZ/arcgis/rest/services"
+MPLS_CENTERLINE_URL = f"{MPLS_ARCGIS}/MPLS_Centerline/FeatureServer/0/query"
+# Critical Parking Area (permit) block faces: 330, "2 HR Except By Permit" +
+# "8am-6pm Mon-Fri", edited 2024-11. Minneapolis's sign inventory uses
+# numeric codes with no published legend, so this is all it gets.
+MPLS_PERMIT_URL = f"{MPLS_ARCGIS}/CPA_Update/FeatureServer/0/query"
+# A1-A25 are freeways and highways; A30 = arterials, A40 = local streets.
+MPLS_STREET_CLASSES = ("A30", "A40")
+CURBS_CACHE_DAYS = 7
+CURBS_PAD_M = 150            # fetched area beyond the radius, so nearby searches share a cache entry
+TICKETS_WARN = 15            # no-parking tickets nearby in 2025 before a block gets a warning
+
 # ── OpenStreetMap lots (Overpass) ────────────────────────────────────────
 # Lots and ramps exist in OSM but almost never have prices (146 features near
 # the North Loop, ~none with fee info), so they're listed, not priced.
@@ -67,6 +90,14 @@ WALK_M_PER_MIN = 80          # ~3 mph, for straight-line estimates
 WALK_DETOUR = 1.3            # streets vs straight line, for estimates
 WALK_VALUE_PER_MIN = 0.20    # $ a minute of walking is worth when ranking
 OVER_LIMIT_PENALTY = 25.0    # $ added when the stay runs past the time limit
+# Unmetered curbs are free but unverified, so they rank a little behind a
+# meter that's free at that hour (less so where parking is posted), and
+# further back with a zone on part of the side or a lot of tickets nearby.
+UNMETERED_PENALTY = 1.0
+POSTED_PARKING_PENALTY = 0.25
+PARTIAL_SIGNS_PENALTY = 1.0
+TICKETS_PENALTY = 2.0
+MAJOR_STREET_PENALTY = 2.0
 WALKS_PER_PLAN = 25          # candidates sent to Google for real walk times
 MAX_OPTIONS = 15
 MAX_STAY_MINUTES = 12 * 60
